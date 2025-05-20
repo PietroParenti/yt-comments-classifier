@@ -1,0 +1,2252 @@
+---
+title: "Spam Detection"
+author: "Pietro Parenti"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# Unprocessed DTM
+
+The machine learning analyses will be conducted twice: once using an unsupervised document-term matrix, and a second time using an optimized DTM (see the Python code for details on the optimization method).
+At the end, the results from both approaches will be compared.
+
+This first phase will therefore use the raw, unprocessed DTM.
+
+## Import and Descriptive Statistics
+
+Import the Document Term Matrix
+
+```{r}
+dtm <- read.csv("https://raw.githubusercontent.com/PietroParenti/yt-comments-classifier/main/dtm.csv")
+dtm_original=dtm
+```
+
+```{r}
+dim(dtm_original)
+```
+
+The DTM contains 1902 observations (comments) and 4302 columns, meaning that the comments include 4,302 unique words.
+
+Response variable frequency
+
+```{r}
+table(dtm_original$spam)
+```
+
+The response variable had been balanced during the previous analyses conducted in Python.
+
+Below are the most frequent words in the document-term matrix.
+
+```{r warning=FALSE}
+# excluding spam
+dtm_2 <- dtm_original[ , setdiff(names(dtm_original), "spam")]
+
+# sum on every column
+col_sums <- colSums(dtm_2)
+
+# sort
+top5 <- sort(col_sums, decreasing = TRUE)[1:5]
+
+# top 5
+print(top5)
+
+rm(col_max_sum,col_sums,top5,dtm_2)
+```
+
+## Dimensional Reduction
+
+The dataset contains too many variables: running even simple models requires significant computational effort. Therefore, I apply dimensionality reduction techniques to reduce the number of predictors.
+
+Initial number of variables (features): 
+
+```{r}
+ncol(dtm)
+```
+
+All words in the document term matrix that appear only once are removed.
+
+```{r}
+# excluding spam
+X <- dtm[, setdiff(names(dtm), "spam")]
+
+# sum on every column
+col_sums <- colSums(X)
+
+# keep only if sum > 1
+X_filtered <- X[, col_sums > 1]
+dtm <- cbind(X_filtered, spam = dtm$spam)
+
+rm(X,X_filtered,col_sums)
+
+ncol(dtm)
+```
+
+Have been removed 2617 words.
+
+### Principal Components Analisis
+
+Principal Component Analysis is a dimensionality reduction technique that transforms correlated variables into a smaller set of uncorrelated components, capturing the most variance in the data.
+
+```{r}
+dtm.pc <- prcomp(dtm[, -which(names(dtm) == "spam")],
+                       scale. = TRUE)
+```
+
+The scale.=TRUE option standardizes each variable so that it has a mean of 0 and a standard deviation of 1.
+This is important because PCA is highly sensitive to the scale of the variables.
+
+In a document-term matrix, some words may have very high values (frequent terms), while others appear only rarely.
+Without scaling, the principal components would give disproportionate weight to high-frequency words, potentially distorting the analysis.
+
+```{r warning=FALSE}
+pcs <- dtm.pc$rotation 
+
+parole <- colnames(dtm)[colnames(dtm) != "spam"]
+
+# extracting n words per pc
+top_loadings <- function(pc, n = 5) {
+  loadings_abs <- abs(pc)
+  top_indices <- order(loadings_abs, decreasing = TRUE)[1:n]
+  data.frame(
+    Words = parole[top_indices],
+    Loading = round(pc[top_indices], 4)  
+  )
+}
+
+# number of pcs to visualize
+n_pc <- 3
+
+top_words_list <- lapply(1:n_pc, function(i) {
+  top_loadings(pcs[, i], n = 5)
+})
+
+names(top_words_list) <- paste0("PC", 1:n_pc)
+
+top_words_table <- do.call(cbind, top_words_list)
+
+print(top_words_table[,-1 ])
+
+rm(n_pc,parole,top_loadings,top_words_list,top_words_table,pcs)
+```
+
+We can see above the words that contribute most to the first three principal components. Unfortunately, these components are hard to interpret. Therefore, in the following analyses, we will not provide a detailed interpretation of the significant variables in the models, as doing so would be difficult and potentially misleading.
+
+Percentage of Xs variability explained by each principal component.
+
+```{r}
+sd <- dtm.pc$sdev[1:20] 
+# Calculate explained variance for each PC
+var_explained <- sd^2/sum(sd^2)
+
+# Create enhanced scree plot
+plot(var_explained,
+     type = "o",
+     pch = 19,
+     col = "steelblue",
+     lwd = 2,
+     ylab = "Percentage of Variance Explained",
+     xlab = "Principal Component Number",
+     main = "Scree Plot: Variance Explained by PCs",
+     xaxt = "n",
+     ylim = c(0, max(var_explained)*1.1),
+     panel.first = grid(nx = NA, ny = NULL, col = "gray90", lty = "dotted"))
+
+# Custom x-axis with all PC numbers
+axis(1, at = 1:20, labels = 1:20, las = 1, cex.axis = 0.8)
+
+
+# Add percentage labels for first few PCs
+text(1:5, var_explained[1:5], 
+     labels = paste0(round(var_explained[1:5]*100, 1), "%"), 
+     pos = 3, cex = 0.8, col = "steelblue")
+```
+
+
+Cumulative plot
+
+```{r warning=FALSE}
+# Calculate cumulative variance
+cum_var <- cumsum(sd^2)/sum(sd^2)
+
+# Find number of PCs needed to explain 90% of variance
+n_pc_90 <- which.max(cum_var >= 0.9)
+
+# Enhanced plot with ggplot2
+library(ggplot2)
+ggplot(data.frame(PC = 1:20, CumVar = cum_var), aes(x = PC, y = CumVar)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_hline(yintercept = 0.9, color = "red", linewidth = 1, linetype = "dashed") +
+  geom_vline(xintercept = n_pc_90, color = "darkgreen", linewidth = 1, linetype = "dotted") +
+  geom_text(aes(x = n_pc_90, y = 0.5, 
+                label = paste("PC", n_pc_90, "explains more than 90%")),
+            color = "darkgreen", angle = 90, vjust = -0.5) +
+  scale_x_continuous(breaks = 1:20, minor_breaks = NULL) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Cumulative Variance Explained by Principal Components",
+       subtitle = "Percentage of cumulative variance vs. number of PCs",
+       x = "Number of Principal Components",
+       y = "Cumulative Variance Explained") +
+  theme_minimal() +
+  theme(panel.grid.major = element_line(color = "gray90"),
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+rm(cum_var,elbow_point,n_pc_90,sd,var_explained)
+```
+
+I follow the (unwritten) rule of selecting the smallest number of principal components that explain at least 90% of the total variance.
+In this case, I select M = 17 components.
+
+```{r}
+dtm.pc <- dtm.pc$x[,1:17]
+dim(dtm.pc)
+```
+Adding spam column. 
+
+```{r}
+dtm.pc <- as.data.frame(dtm.pc)
+dtm.pc <- cbind(dtm.pc,dtm$spam)
+names(dtm.pc)[names(dtm.pc) == "dtm$spam"] <- "spam"
+dim(dtm.pc)
+```
+
+## Train and Test
+
+The dataset is split into training and test sets: 70% for training and 30% for testing.
+
+The training and test sets are also balanced based on the spam variable. After splitting the data, a check is performed to ensure that both subsets remain balanced.
+
+```{r}
+set.seed(123)
+
+# searching for spam and non spam indexes
+index_spam <- which(dtm.pc$spam == 1)
+index_ham <- which(dtm.pc$spam == 0)
+
+# sampling
+train_spam <- sample(index_spam, size = 0.7 * length(index_spam))
+train_ham <- sample(index_ham, size = 0.7 * length(index_ham))
+
+train_index <- c(train_spam, train_ham)
+
+dtm.pc.train <- dtm.pc[train_index, ]
+dtm.pc.test  <- dtm.pc[-train_index, ]
+
+# verifing
+table(dtm.pc.train$spam) / nrow(dtm.pc.train)
+table(dtm.pc.test$spam) / nrow(dtm.pc.test)
+
+rm(index_ham,index_spam,train_ham,train_index,train_spam)
+```
+
+Code to save the datasets locally for use in Python analyses.
+Uncomment the chunk below to execute the saving process.
+
+```{r}
+#write.csv(dtm.pc.test, "C://Users//paren//Desktop//_MAGISTRALE//_Machine_Learning//progetto//dtm.pc.test.csv", row.names = FALSE)
+
+#write.csv(dtm.pc.train, "C://Users//paren//Desktop//_MAGISTRALE//_Machine_Learning//progetto//dtm.pc.train.csv", row.names = FALSE)
+```
+
+## Models evaluation
+
+Now principal components extracted from the text data are used as input features to assess the classification accuracy of various machine learning models.
+
+Each model is evaluated using the test error rate.
+
+### Linear Model
+
+The first model evaluated is the linear model. However, it is not optimal for classification tasks—even binary ones—because it assumes a continuous response and can produce predicted values outside the [0,1] range, which are not interpretable as probabilities.
+
+```{r}
+model <- lm(spam ~ ., data = dtm.pc.train) 
+
+summary(model)
+```
+
+The linear model fits the binary outcome spam using 17 principal components (PCs) as predictors. The overall model is statistically significant (F = 8.525, p < 2.2e-16), but the adjusted R² is relatively low (0.088), indicating limited explanatory power.
+
+Some components (PC3 and PC7 in particular) show statistically significant associations with the response variable, suggesting they contribute to differentiating between spam and non-spam comments.
+
+However, interpreting individual PCs is inherently difficult, as each component is a linear combination of thousands of original terms. The direction and magnitude of coefficients do not directly map back to specific words or features, limiting the model's interpretability despite statistical significance.
+This limitation applies to all models that follow—since they rely on the same transformed input space—but this comment will not be repeated to avoid redundancy.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+```{r}
+pred <- ifelse(pred > 0.5, 1, 0)
+```
+
+Training error rate calculation
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+All the training error rates are stored in a data frame to make easier future comparison.
+
+```{r}
+TER <- data.frame(
+  method = character(),
+  training.error.rate = numeric(),
+  stringsAsFactors = FALSE
+)
+```
+
+
+```{r}
+TER <- rbind(TER, data.frame(method = "linear model", training.error.rate = TER.mod))
+```
+
+
+```{r}
+rm(pred,TER.mod,model)
+```
+
+
+### Logistic Model
+
+The logistic model is the go-to choice for binary outcome prediction.
+
+```{r warning=FALSE}
+model <- glm(spam ~ ., data = dtm.pc.train, family = binomial)
+
+summary(model)
+```
+
+The logistic regression model is statistically significant. Several PCs are highly significant predictors of the spam class.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test, type= "response")
+```
+
+```{r}
+pred <- ifelse(pred > 0.5, 1, 0)
+```
+
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "logistic model", training.error.rate = TER.mod))
+```
+
+
+```{r}
+rm(pred,TER.mod,model)
+```
+
+
+### Linear Discriminant Analisis
+
+The idea behind LDA is to find a linear combination of the predictor variables that best separates the different classes.
+
+It is tighly connected with the idea of Bayes theorem: it assignes a unit to that class with maximum probability a posteriori. For K classes, we have:
+
+- a likelihood part: a density function for X given that we are in a specific class f_k(X), for k=1,...,K
+
+- prior part: prior distribution pi(k) of class k (prior belief of prob of being in class k)
+
+```{r}
+model <- MASS::lda(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+
+The LDA output shows:
+
+- prior probabilities: set to 0.5 for both classes, reflecting a balanced dataset
+
+- group means: average values of each principal component (PC) per class, larger differences suggest stronger discriminative power
+
+- coefficients of linear discriminants (LD1): weights used to form a linear combination of PCs that best separates the two classes. PCs with larger absolute values contribute more to class separation.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+pred <- pred$class
+```
+
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+"Curiously, it turns out that the classifcations that we get if we use linear regression to predict a binary response will be the same as for the linear discriminant analysis (LDA)"
+An Introduction to Statistical Learning, page 132
+
+```{r}
+TER <- rbind(TER, data.frame(method = "linear discriminant analisis", training.error.rate = TER.mod))
+```
+
+
+```{r}
+rm(pred,TER.mod,model)
+```
+
+
+### Quadratic Discriminant Analisis
+
+```{r}
+model <- MASS::qda(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+QDA differs from LDA by allowing each class to have its own covariance matrix. This added flexibility can improve performance when class variances differ.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+pred <- pred$class
+```
+
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+
+```{r}
+TER <- rbind(TER, data.frame(method = "quadratic discriminant analisis", training.error.rate = TER.mod))
+```
+
+
+```{r}
+rm(pred,TER.mod,model)
+```
+
+
+### Naive Bayes
+
+Naive Bayes is a simple yet effective classification algorithm based on Bayes’ Theorem, with the naive assumption that predictors (features) are conditionally independent given the class.
+
+```{r}
+model <- e1071::naiveBayes(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+
+```{r}
+TER <- rbind(TER, data.frame(method = "naive bayes", training.error.rate = TER.mod))
+```
+
+
+```{r}
+rm(pred,TER.mod,model)
+```
+
+
+### KNN
+
+K nearest neighbours (KNN regression) is a non-parametric approach, based on on averages of Ys that are close to the evaluation point of interest. 
+
+This for loop performs KNN regression with k ranging from 1 to 100, evaluating the test error rate on the test dataset for each k to identify the value of k that minimizes the test error.
+
+```{r}
+set.seed(123)
+TER.models=c()
+
+for (k in seq(1, 100, by = 1)) {
+  pred <- class::knn(cbind(dtm.pc.train[, !(colnames(dtm.pc.train) == "spam")]),
+                       cbind(dtm.pc.test[, !(colnames(dtm.pc.train) == "spam")]), 
+                       dtm.pc.train$spam, 
+                       k = k)
+  TER.mod=mean(pred!=dtm.pc.test$spam)
+  TER.models=c(TER.models,TER.mod)
+}
+
+TER.models=cbind(seq(1, 100, by = 1),TER.models)
+```
+
+```{r warning=FALSE}
+library(ggplot2)
+
+# Converti i risultati in un dataframe per ggplot
+results_df <- data.frame(
+  k = TER.models[, 1],
+  TER = TER.models[, 2]
+)
+
+# Trova il k ottimale (TER minimo)
+optimal_k <- results_df$k[which.min(results_df$TER)]
+min_TER <- min(results_df$TER)
+
+# Crea il grafico con ggplot2
+ggplot(results_df, aes(x = k, y = TER)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_vline(xintercept = optimal_k, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = min_TER, linetype = "dashed", color = "darkgreen") +
+  annotate("text", 
+           x = optimal_k + 10, 
+           y = max(results_df$TER), 
+           label = paste("Optimal k =", optimal_k),
+           color = "red") +
+  annotate("text",
+           x = 90,
+           y = min_TER + 0.01,
+           label = paste("Min TER =", round(min_TER, 3)),
+           color = "darkgreen") +
+  labs(title = "k-NN Classification Performance",
+       subtitle = "Test Error Rate (TER) vs. Number of Neighbors (k)",
+       x = "Number of Neighbors (k)",
+       y = "Test Error Rate") +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+
+The value of k that minimizes the TER is 5.
+
+```{r}
+min(TER.models)
+#k=5
+```
+
+Rerunning the KNN regression with k = 5.
+
+```{r}
+set.seed(123)
+
+pred <- class::knn(cbind(dtm.pc.train[, !(colnames(dtm.pc.train) == "spam")]),
+                       cbind(dtm.pc.test[, !(colnames(dtm.pc.train) == "spam")]), 
+                       dtm.pc.train$spam, 
+                       k = optimal_k)
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "KNN", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER.mod,k,TER.models,results_df,min_TER,optimal_k)
+```
+
+
+### Ridge Regression
+
+Ridge regression is a regularized version of linear regression that adds an L2 penalty term to the loss function. This penalty shrinks the regression coefficients towards zero, helping to reduce model complexity and multicollinearity.
+
+```{r}
+set.seed(123)
+lambda.grid <- 10^seq(-6,5,length=100)
+# if lambda = 0 then ridge becomes lm
+# if lambda --> Inf then all coeffs --> 0 since
+# RSS impact is negligible, relative to the
+# role played by the penalty
+ridge.mod <- glmnet::glmnet(dtm.pc.train[, !(colnames(dtm.pc) == "spam")],
+                            dtm.pc.train[,  (colnames(dtm.pc) == "spam")],
+                            alpha=0,
+                            lambda=lambda.grid,
+                            family = "binomial")
+dim(coef(ridge.mod)) #     18 coeffs (one intercept + 17pcs)
+#                        x 100 lambdas
+```
+
+Choosing the best lambda
+
+```{r}
+matplot(ridge.mod$lambda,
+        t(as.matrix(ridge.mod$beta)),
+        type="l",log="x",lwd=2,
+        main="Ridge regressors",
+        xlab="lambda",
+        ylab="coeff")
+```
+
+We use CV for finding the optimal lambda:
+
+```{r}
+set.seed(123)
+
+# CV for finding the optimal lambda:
+# we can use cv.glmnet in the same package
+# by default: 10-fold cv
+cv.out <- glmnet::cv.glmnet(as.matrix(dtm.pc.train[, !(colnames(dtm.pc) == "spam")]),
+                            as.numeric(dtm.pc.train[,  (colnames(dtm.pc) == "spam")]),
+                    alpha=0,
+                    lambda=lambda.grid,
+                    family="binomial")
+
+cv.out$lambda.min # lambda with min estimated test error
+
+```
+
+The lambda of the simpliest model with error within 1 stad dev from minimun error:
+
+```{r}
+cv.out$lambda.1se # lambda of the simplest model
+# with error within 1 std from minumum error
+```
+
+Plot of the CV error: the two vertical lines are log(lambda.min) and log(lambda.1se)
+
+```{r}
+# plot the CV error (-+ 1 std) as a function of lambda
+plot(cv.out)
+# the two verticle lines are log(lambda.min) and
+# log(lambda.1se)
+abline(v=log(cv.out$lambda.1se),lwd=2,col="black")
+```
+
+```{r}
+# Previsione delle probabilità sul training set
+pred.prob <- predict(cv.out, 
+                     newx = as.matrix(dtm.pc.test[, !(colnames(dtm.pc) == "spam")]), 
+                     s = cv.out$lambda.1se, 
+                     type = "response")
+```
+
+
+```{r}
+# Classificazione binaria (cutoff 0.5)
+pred <- ifelse(pred.prob > 0.5, 1, 0)
+
+# Test Error Rate
+TER.mod <- mean(pred != dtm.pc.test$spam)
+TER.mod
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "ridge regression", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(cv.out,model,ridge.mod,std.cof,X,lambda.grid,TER.mod,y,std.coeff,pred,pred.prob,lambda_values,cv_data,coef_matrix)
+```
+
+
+### Lasso Regression
+
+Lasso regression is a regularized version of linear regression that adds an L1 penalty term to the loss function. Like ridge, it shrinks the coefficients to reduce overfitting and handle multicollinearity. However, unlike ridge, lasso can force some coefficients to be exactly zero, effectively performing variable selection.
+
+```{r}
+set.seed(123)
+lambda.grid <- 10^seq(-6,5,length=100)
+# if lambda = 0 then ridge becomes lm
+# if lambda --> Inf then all coeffs --> 0 since
+# RSS impact is negligible, relative to the
+# role played by the penalty
+ridge.mod <- glmnet::glmnet(dtm.pc.train[, !(colnames(dtm.pc) == "spam")],
+                            dtm.pc.train[,  (colnames(dtm.pc) == "spam")],
+                            alpha=1,
+                            lambda=lambda.grid,
+                            family = "binomial")
+dim(coef(ridge.mod)) #     18 coeffs (one intercept + 17pcs)
+#                        x 100 lambdas
+```
+
+
+```{r}
+matplot(ridge.mod$lambda,
+        t(as.matrix(ridge.mod$beta)),
+        type="l",log="x",lwd=2,
+        main="Lasso regressors",
+        xlab="lambda",
+        ylab="coeff")
+
+```
+
+```{r}
+set.seed(123)
+# CV for finding the optimal lambda:
+# we can use cv.glmnet in the same package
+# by default: 10-fold cv
+cv.out <- glmnet::cv.glmnet(as.matrix(dtm.pc.train[, !(colnames(dtm.pc) == "spam")]),
+                            as.numeric(dtm.pc.train[,  (colnames(dtm.pc) == "spam")]),
+                    alpha=1,
+                    lambda=lambda.grid,
+                    family="binomial")
+
+cv.out$lambda.min # lambda with min estimated test error
+
+```
+
+The lambda of the simpliest model with error within 1 stad dev from minimun error:
+
+```{r}
+cv.out$lambda.1se # lambda of the simplest model
+# with error within 1 std from minumum error
+```
+
+Plot of the CV error: the two vertical lines are log(lambda.min) and log(lambda.1se)
+
+```{r}
+# plot the CV error (-+ 1 std) as a function of lambda
+plot(cv.out)
+# the two verticle lines are log(lambda.min) and
+# log(lambda.1se)
+abline(v=log(cv.out$lambda.1se),lwd=2,col="black")
+```
+
+At the top of this plot, we can observe how the number of coefficients in the model progressively decreases. This happens because, as mentioned earlier, lasso has the ability to shrink some coefficients exactly to zero, effectively removing them from the model. This is in contrast to ridge regression, which only shrinks coefficients toward zero without ever setting them exactly to zero.
+
+```{r}
+# Previsione delle probabilità sul training set
+pred.prob <- predict(cv.out, 
+                     newx = as.matrix(dtm.pc.test[, !(colnames(dtm.pc) == "spam")]), 
+                     s = cv.out$lambda.1se, 
+                     type = "response")
+```
+
+
+```{r}
+# Classificazione binaria (cutoff 0.5)
+pred <- ifelse(pred.prob > 0.5, 1, 0)
+
+# Test Error Rate
+TER.mod <- mean(pred != dtm.pc.test$spam)
+TER.mod
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "lasso regression", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(cv.out,model,ridge.mod,std.cof,X,lambda.grid,TER.mod,y,std.coeff,pred,pred.prob,poly.model)
+```
+
+
+### Regression Tree (best)
+
+General idea between tree based models: split the predictor space into regions and then provide the same y_hat for all observations that fall within the same region.
+
+For categorical y: yhat will be a local mode, among those Xs in the region
+
+In regression trees we want to find regions of the space of predictors that minimises TER.
+
+```{r}
+model <- tree::tree(as.factor(spam) ~ . , dtm.pc.train)
+
+summary(model)
+```
+
+Tree to prune:
+
+```{r warning=FALSE}
+plot(model)
+
+# Aggiungi testo migliorato
+text(model, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))
+
+```
+
+Unpruned tree
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+Searching the best point to prune the tree
+
+Function to prune the large tree and to select the best subtree, according to CV: runs a K-fold cross-validation experiment to find the number of misclassifications as a function of the cost-complexity parameter k.
+
+```{r}
+set.seed(1)
+
+model.cv= tree::cv.tree(model,
+                        FUN= prune.misclass)
+```
+
+Optimal size of the tree:
+
+```{r}
+# Trova la posizione del minimo errore
+min_dev_index <- which.min(model.cv$dev)
+
+# Numero ottimale di nodi corrispondente al minimo errore
+optimal_size <- model.cv$size[min_dev_index]
+optimal_size
+```
+
+Number of terminal nodes
+
+```{r}
+# Crea un dataframe con i dati
+cv_data <- data.frame(
+  Size = model.cv$size,
+  Deviance = model.cv$dev
+)
+
+# Trova la dimensione ottimale
+optimal_size <- model.cv$size[which.min(model.cv$dev)]
+
+# Plot migliorato con ggplot2
+library(ggplot2)
+ggplot(cv_data, aes(x = Size, y = Deviance)) +
+  geom_line(color = "steelblue", linewidth = 1.5) +
+  geom_point(color = "steelblue", size = 3, shape = 19) +
+  geom_vline(xintercept = optimal_size, 
+             color = "red", 
+             linetype = "dashed", 
+             linewidth = 1) +
+  geom_point(data = subset(cv_data, Size == optimal_size),
+             color = "red", 
+             size = 5, 
+             shape = 1) +
+  annotate("text", 
+           x = optimal_size, 
+           y = max(cv_data$Deviance)-100,
+           label = paste("Optimal size =", optimal_size),
+           color = "red",
+           vjust = -1,
+           hjust = -0.1) +
+  scale_x_continuous(breaks = seq(min(cv_data$Size), 
+                                 max(cv_data$Size), 
+                                 by = 1)) +
+  labs(title = "Tree Complexity vs. Deviance",
+       subtitle = "Cross-validated deviance as function of tree size",
+       x = "Number of Terminal Nodes",
+       y = "Cross-Validated Deviance") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+Value of the cost-complexity parameter
+
+```{r warning=FALSE}
+# Create a data frame for plotting
+ccp_data <- data.frame(
+  Alpha = model.cv$k,
+  Deviance = model.cv$dev
+)
+
+# Find the optimal alpha value
+optimal_alpha <- model.cv$k[which.min(model.cv$dev)]
+
+# Enhanced plot with ggplot2
+library(ggplot2)
+ggplot(ccp_data, aes(x = Alpha, y = Deviance)) +
+  geom_line(color = "steelblue", linewidth = 1.5) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_vline(xintercept = optimal_alpha, 
+             color = "red", 
+             linetype = "dashed", 
+             linewidth = 1) +
+  geom_point(data = subset(ccp_data, Alpha == optimal_alpha),
+             color = "red", 
+             size = 5, 
+             shape = 1) +
+  annotate("text",
+           x = optimal_alpha,
+           y = max(ccp_data$Deviance)-100,
+           label = paste("Optimal alpha =", round(optimal_alpha, 4)),
+           color = "red",
+           vjust = -1,
+           hjust = -0.1) +
+  scale_x_continuous(trans = 'log10',  # Log scale for alpha values
+                     breaks = scales::trans_breaks("log10", function(x) 10^x),
+                     labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  labs(title = "Cost-Complexity Tradeoff",
+       subtitle = "Cross-validated deviance vs. complexity parameter (alpha)",
+       x = expression(paste("Complexity Parameter (", alpha, ")")),
+       y = "Cross-Validated Deviance") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+```
+
+```{r warning=FALSE}
+library(tree)
+model.pruned = tree::prune.misclass(model,
+                                 best = optimal_size)
+```
+
+```{r warning=FALSE}
+plot(model.pruned)
+# Aggiungi testo migliorato
+text(model.pruned, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))  
+
+```
+
+```{r}
+pred= predict(model.pruned, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+The test error rate is almost the same but the model is simplier. 
+
+```{r}
+TER <- rbind(TER, data.frame(method = "classification tree best", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER.mod,model,model.cv,model.pruned,min_dev_index,optimal_size,optimal_alpha,ccp_data,cv_data)
+```
+
+
+### Regression Tree (simplier)
+
+We can further prune the tree: if the plot shows that the error remains similar for a smaller number of terminal nodes, we can opt for a more parsimonious model. Specifically, we select the smallest tree whose cross-validation error is within 1 standard error of the minimum.
+
+```{r}
+model <- tree::tree(as.factor(spam) ~ . , dtm.pc.train)
+
+summary(model)
+```
+
+Tree to prune:
+
+```{r warning=FALSE}
+plot(model)
+text(model, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85)) 
+```
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+```{r}
+set.seed(1)
+
+model.cv= tree::cv.tree(model,
+                        FUN= prune.misclass)
+```
+
+```{r}
+# Calcola la devianza minima e la sua soglia "1 SE"
+min_dev <- min(model.cv$dev)
+se_threshold <- min_dev + sd(model.cv$dev) / sqrt(length(model.cv$dev))
+
+# Trova il modello più semplice con errore <= soglia
+simpler_size <- min(model.cv$size[model.cv$dev <= se_threshold])
+simpler_size
+```
+
+```{r warning=FALSE}
+library(tree)
+model.pruned = tree::prune.misclass(model,
+                                 best = simpler_size)
+```
+
+```{r warning=FALSE}
+plot(model.pruned)
+text(model.pruned, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))  
+```
+
+```{r}
+pred= predict(model.pruned, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+The error rate is a little bit higher, but the model is much simpler (from 10 to 3).
+
+```{r}
+TER <- rbind(TER, data.frame(method = "classification tree 1se", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER.mod,model,model.cv,model.pruned, min_dev, simpler_size, se_threshold)
+```
+
+### Bagging
+
+We generate B bootstrap samples and fit a decision tree on each of them. The final prediction is obtained by aggregating the results of all trees: taking the majority vote (mode) in classification.
+Is a random forest with m=p (m is mtry in the formula)
+
+```{r message=FALSE, warning=FALSE}
+library(randomForest)
+set.seed(1)
+
+model= randomForest(as.factor(spam) ~ . , dtm.pc.train,
+                    mtry=ncol(dtm.pc.train)-1, importance=T)
+model
+```
+
+```{r}
+varImpPlot(model)
+```
+
+Two measures of variable importance are reported. The fist is based upon the mean decrease of accuracy in predictions on the out of bag samples when a given variable is permuted. The second is a measure of the total decrease in node impurity that results from splits over that variable, averaged over all trees
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "bagging", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER.mod,model,model.cv,model.pruned)
+```
+
+### Random Forest
+
+Using mtry = p (where p is the total number of features), as done above, is equivalent to fitting a Bagged Tree, since each tree considers all variables for splitting. This reduces variability among trees, potentially worsening performance due to lower model diversity.
+Therefore, we now use a random subset of predictors for each tree, specifically, we adopt the default value mtry = sqrt(p), 4 in this case, which promotes greater tree diversity and often improves predictive accuracy.
+
+```{r warning=FALSE}
+library(randomForest)
+set.seed(1)
+
+model= randomForest(as.factor(spam) ~ . , dtm.pc.train,
+                     importance=T)
+model
+```
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER.mod=mean(pred!=dtm.pc.test$spam) 
+TER.mod
+```
+
+```{r}
+varImpPlot(model)
+```
+
+```{r}
+TER <- rbind(TER, data.frame(method = "random forest", training.error.rate = TER.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER.mod,model,model.cv,model.pruned)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Processed DTM
+
+We now rerun all analyses using the optimized document term matrix. Most comments will not be repeated in order to avoid redundancy.
+
+## Import and Descriptive Statistics
+
+Import the Document Term Matrix
+
+```{r}
+dtm <- read.csv("https://raw.githubusercontent.com/PietroParenti/yt-comments-classifier/main/dtm2.csv")
+dtm_original=dtm
+```
+
+```{r}
+dim(dtm_original)
+```
+
+The new DTM contains 1902 observations (comments) and 1286 columns.
+
+Response variable frequency
+
+```{r}
+table(dtm_original$spam)
+```
+
+The response variable had been balanced during the previous analyses conducted in Python.
+
+Below are the most frequent words in the document term matrix.
+
+```{r warning=FALSE}
+# excluding spam
+dtm_2 <- dtm_original[ , setdiff(names(dtm_original), "spam")]
+
+# sum on every column
+col_sums <- colSums(dtm_2)
+
+# sort
+top5 <- sort(col_sums, decreasing = TRUE)[1:5]
+
+# top 5
+print(top5)
+
+rm(col_max_sum,col_sums,top5,dtm_2)
+```
+
+None of the most frequent words from the previous matrix are present here. This is because we applied English stopwords, and evidently all previously most frequent terms were among them.
+
+
+## Dimensional Reduction
+
+Initial number of variables (features): 
+  
+```{r}
+ncol(dtm)
+```
+
+All words in the document term matrix that appear only once are removed.
+
+```{r}
+# excluding spam
+X <- dtm[, setdiff(names(dtm), "spam")]
+
+# sum on every column
+col_sums <- colSums(X)
+
+# keep only if sum > 1
+X_filtered <- X[, col_sums > 1]
+dtm <- cbind(X_filtered, spam = dtm$spam)
+
+rm(X,X_filtered,col_sums)
+
+ncol(dtm)
+```
+
+Correctly, no words were removed since, during the creation of the DTM in Python, we had chosen to keep only words with a frequency greater than or equal to 2.
+
+
+### Principal Components Analisis
+
+```{r}
+dtm.pc <- prcomp(dtm[, -which(names(dtm) == "spam")],
+                 scale. = TRUE)
+```
+
+```{r warning=FALSE}
+pcs <- dtm.pc$rotation 
+
+parole <- colnames(dtm)[colnames(dtm) != "spam"]
+
+# extracting n words per pc
+top_loadings <- function(pc, n = 5) {
+  loadings_abs <- abs(pc)
+  top_indices <- order(loadings_abs, decreasing = TRUE)[1:n]
+  data.frame(
+    Words = parole[top_indices],
+    Loading = round(pc[top_indices], 4)  
+  )
+}
+
+# number of pcs to visualize
+n_pc <- 3
+
+top_words_list <- lapply(1:n_pc, function(i) {
+  top_loadings(pcs[, i], n = 5)
+})
+
+names(top_words_list) <- paste0("PC", 1:n_pc)
+
+top_words_table <- do.call(cbind, top_words_list)
+
+print(top_words_table[,-1 ])
+
+rm(n_pc,parole,top_loadings,top_words_list,top_words_table,pcs)
+```
+
+We can see above the words that contribute most to the first three principal components. Unfortunately, even though the words shown appear more interpretable than in the previous PCs, these components remain hard to interpret. Therefore, in the following analyses, we will not provide a detailed interpretation of the significant variables in the models, as doing so would be difficult and potentially misleading.
+
+Percentage of Xs variability explained by each principal component.
+
+```{r}
+sd <- dtm.pc$sdev[1:20] 
+# Calculate explained variance for each PC
+var_explained <- sd^2/sum(sd^2)
+
+# Create enhanced scree plot
+plot(var_explained,
+     type = "o",
+     pch = 19,
+     col = "steelblue",
+     lwd = 2,
+     ylab = "Percentage of Variance Explained",
+     xlab = "Principal Component Number",
+     main = "Scree Plot: Variance Explained by PCs",
+     xaxt = "n",
+     ylim = c(0, max(var_explained)*1.1),
+     panel.first = grid(nx = NA, ny = NULL, col = "gray90", lty = "dotted"))
+
+# Custom x-axis with all PC numbers
+axis(1, at = 1:20, labels = 1:20, las = 1, cex.axis = 0.8)
+
+
+# Add percentage labels for first few PCs
+text(1:5, var_explained[1:5], 
+     labels = paste0(round(var_explained[1:5]*100, 1), "%"), 
+     pos = 3, cex = 0.8, col = "steelblue")
+```
+
+
+Cumulative plot
+
+```{r warning=FALSE}
+# Calculate cumulative variance
+cum_var <- cumsum(sd^2)/sum(sd^2)
+
+# Find number of PCs needed to explain 90% of variance
+n_pc_90 <- which.max(cum_var >= 0.9)
+
+# Enhanced plot with ggplot2
+library(ggplot2)
+ggplot(data.frame(PC = 1:20, CumVar = cum_var), aes(x = PC, y = CumVar)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_hline(yintercept = 0.9, color = "red", linewidth = 1, linetype = "dashed") +
+  geom_vline(xintercept = n_pc_90, color = "darkgreen", linewidth = 1, linetype = "dotted") +
+  geom_text(aes(x = n_pc_90, y = 0.5, 
+                label = paste("PC", n_pc_90, "explains >90%")),
+            color = "darkgreen", angle = 90, vjust = -0.5) +
+  scale_x_continuous(breaks = 1:20, minor_breaks = NULL) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Cumulative Variance Explained by Principal Components",
+       subtitle = "Percentage of cumulative variance vs. number of PCs",
+       x = "Number of Principal Components",
+       y = "Cumulative Variance Explained") +
+  theme_minimal() +
+  theme(panel.grid.major = element_line(color = "gray90"),
+        plot.title = element_text(face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(hjust = 0.5))
+
+# Clean up
+rm(cum_var,elbow_point,n_pc_90,sd,var_explained)
+```
+
+I follow the (unwritten) rule of selecting the smallest number of principal components that explain at least 90% of the total variance.
+Like before, I select M = 17 components.
+
+```{r}
+dtm.pc <- dtm.pc$x[,1:17]
+dim(dtm.pc)
+```
+Adding spam column. 
+
+```{r}
+dtm.pc <- as.data.frame(dtm.pc)
+dtm.pc <- cbind(dtm.pc,dtm$spam)
+names(dtm.pc)[names(dtm.pc) == "dtm$spam"] <- "spam"
+dim(dtm.pc)
+```
+
+## Train and Test
+
+The dataset is split into training and test sets: 70% for training and 30% for testing.
+
+The training and test sets are also balanced based on the spam variable. After splitting the data, a check is performed to ensure that both subsets remain balanced.
+
+```{r}
+set.seed(123)
+
+# searching for spam and non spam indexes
+index_spam <- which(dtm.pc$spam == 1)
+index_ham <- which(dtm.pc$spam == 0)
+
+# sampling
+train_spam <- sample(index_spam, size = 0.7 * length(index_spam))
+train_ham <- sample(index_ham, size = 0.7 * length(index_ham))
+
+train_index <- c(train_spam, train_ham)
+
+dtm.pc.train <- dtm.pc[train_index, ]
+dtm.pc.test  <- dtm.pc[-train_index, ]
+
+# verifing
+table(dtm.pc.train$spam) / nrow(dtm.pc.train)
+table(dtm.pc.test$spam) / nrow(dtm.pc.test)
+
+rm(index_ham,index_spam,train_ham,train_index,train_spam)
+```
+
+Code to save the datasets locally for use in Python analyses.
+Uncomment the chunk below to execute the saving process.
+
+```{r}
+#write.csv(dtm.pc.test, "C://Users//paren//Desktop//_MAGISTRALE//_Machine_Learning//progetto//dtm2.pc.test.csv", row.names = FALSE)
+#write.csv(dtm.pc.train, "C://Users//paren//Desktop//_MAGISTRALE//_Machine_Learning//progetto//dtm2.pc.train.csv", row.names = FALSE)
+```
+
+## Models evaluation
+
+Now principal components extracted from the text data are used as input features to assess the classification accuracy of various machine learning models.
+
+Each model is evaluated using the test error rate.
+
+### Linear Model
+
+```{r}
+model <- lm(spam ~ ., data = dtm.pc.train) 
+
+summary(model)
+```
+
+The linear model fits the binary outcome spam using 17 principal components (PCs) as predictors. The overall model is statistically significant (F = 10.18, p < 2.2e-16), but the adjusted R² is relatively low (0.105), indicating limited explanatory power.
+
+Many components show statistically significant associations with the response variable, suggesting they contribute to differentiating between spam and non-spam comments.
+
+However, like before, interpreting individual PCs is inherently difficult, as each component is a linear combination of thousands of original terms. The direction and magnitude of coefficients do not directly map back to specific words or features, limiting the model's interpretability despite statistical significance.
+This limitation applies to all models that follow—since they rely on the same transformed input space—but this comment will not be repeated to avoid redundancy.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+```{r}
+pred <- ifelse(pred > 0.5, 1, 0)
+```
+
+Training error rate calculation
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+All the training error rates are stored in a data frame to make easier future comparison.
+
+```{r}
+TER2 <- data.frame(
+  method = character(),
+  training.error.rate = numeric(),
+  stringsAsFactors = FALSE
+)
+```
+
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "linear model", training.error.rate = TER2.mod))
+```
+
+
+```{r}
+rm(pred,TER2.mod,model)
+```
+
+
+### Logistic Model
+
+```{r warning=FALSE}
+model <- glm(spam ~ ., data = dtm.pc.train, family = binomial)
+
+summary(model)
+```
+
+The logistic regression model is statistically significant. Several PCs are highly significant predictors of the spam class.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test, type= "response")
+```
+
+```{r}
+pred <- ifelse(pred > 0.5, 1, 0)
+```
+
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "logistic model", training.error.rate = TER2.mod))
+```
+
+
+```{r}
+rm(pred,TER2.mod,model)
+```
+
+
+### Linear Discriminant Analisis
+
+```{r}
+model <- MASS::lda(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+
+The LDA output shows:
+
+- prior probabilities: set to 0.5 for both classes, reflecting a balanced dataset
+
+- group means: average values of each principal component (PC) per class, larger differences suggest stronger discriminative power
+
+- coefficients of linear discriminants (LD1): weights used to form a linear combination of PCs that best separates the two classes. PCs with larger absolute values contribute more to class separation.
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+pred <- pred$class
+```
+
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+"Curiously, it turns out that the classifcations that we get if we use linear regression to predict a binary response will be the same as for the linear discriminant analysis (LDA)"
+An Introduction to Statistical Learning, page 132
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "linear discriminant analisis", training.error.rate = TER2.mod))
+```
+
+
+```{r}
+rm(pred,TER2.mod,model)
+```
+
+
+### Quadratic Discriminant Analisis
+
+```{r}
+model <- MASS::qda(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+pred <- pred$class
+```
+
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "quadratic discriminant analisis", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,model)
+```
+
+
+### Naive Bayes
+
+```{r}
+model <- e1071::naiveBayes(spam~.,
+                   dtm.pc.train)
+
+model
+summary(model)
+```
+
+
+```{r}
+pred <- predict(model, newdata = dtm.pc.test)
+```
+
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "naive bayes", training.error.rate = TER2.mod))
+```
+
+
+```{r}
+rm(pred,TER2.mod,model)
+```
+
+
+### KNN
+
+Searching the best k between 1 and 100.
+
+```{r}
+set.seed(123)
+TER2.models=c()
+
+for (k in seq(1, 100, by = 1)) {
+  pred <- class::knn(cbind(dtm.pc.train[, !(colnames(dtm.pc.train) == "spam")]),
+                       cbind(dtm.pc.test[, !(colnames(dtm.pc.train) == "spam")]), 
+                       dtm.pc.train$spam, 
+                       k = k)
+  TER2.mod=mean(pred!=dtm.pc.test$spam)
+  TER2.models=c(TER2.models,TER2.mod)
+}
+
+TER2.models=cbind(seq(1, 100, by = 1),TER2.models)
+```
+
+```{r warning=FALSE}
+library(ggplot2)
+
+# Convert results to dataframe for ggplot
+results_df <- data.frame(
+  k = TER2.models[, 1],
+  TER2 = TER2.models[, 2]
+)
+
+# Find optimal k (minimum TER2)
+optimal_k <- results_df$k[which.min(results_df$TER2)]
+min_TER2 <- min(results_df$TER2)
+
+# Create plot with ggplot2
+ggplot(results_df, aes(x = k, y = TER2)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_vline(xintercept = optimal_k, linetype = "dashed", color = "red") +
+  geom_hline(yintercept = min_TER2, linetype = "dashed", color = "darkgreen") +
+  annotate("text", 
+           x = optimal_k + 10, 
+           y = max(results_df$TER2), 
+           label = paste("Optimal k =", optimal_k),
+           color = "red") +
+  annotate("text",
+           x = 90,
+           y = min_TER2 + 0.01,
+           label = paste("Min TER =", round(min_TER2, 3)),
+           color = "darkgreen") +
+  labs(title = "k-NN Classification Performance",
+       subtitle = "Test Error Rate (TER) vs. Number of Neighbors (k)",
+       x = "Number of Neighbors (k)",
+       y = "Test Error Rate") +
+  scale_x_continuous(breaks = seq(0, 100, by = 10)) +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+```
+
+
+The value of k that minimizes the TER is 6.
+
+```{r}
+min(TER2.models)
+#k=6
+```
+
+Rerunning the KNN regression with k = 6.
+
+```{r}
+set.seed(123)
+
+pred <- class::knn(cbind(dtm.pc.train[, !(colnames(dtm.pc.train) == "spam")]),
+                       cbind(dtm.pc.test[, !(colnames(dtm.pc.train) == "spam")]), 
+                       dtm.pc.train$spam, 
+                       k = optimal_k)
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "KNN", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,k,TER2.models,results_df,min_TER2,optimal_k)
+```
+
+
+### Ridge Regression
+
+```{r}
+set.seed(123)
+lambda.grid <- 10^seq(-6,5,length=100)
+# if lambda = 0 then ridge becomes lm
+# if lambda --> Inf then all coeffs --> 0 since
+# RSS impact is negligible, relative to the
+# role played by the penalty
+ridge.mod <- glmnet::glmnet(dtm.pc.train[, !(colnames(dtm.pc) == "spam")],
+                            dtm.pc.train[,  (colnames(dtm.pc) == "spam")],
+                            alpha=0,
+                            lambda=lambda.grid,
+                            family = "binomial")
+dim(coef(ridge.mod)) #     18 coeffs (one intercept + 17pcs)
+#                        x 100 lambdas
+```
+
+Choosing the best lambda
+
+```{r}
+matplot(ridge.mod$lambda,
+        t(as.matrix(ridge.mod$beta)),
+        type="l",log="x",lwd=2,
+        main="Ridge regressors",
+        xlab="lambda",
+        ylab="coeff")
+```
+
+We use CV for finding the optimal lambda:
+
+```{r}
+set.seed(123)
+
+# CV for finding the optimal lambda:
+# we can use cv.glmnet in the same package
+# by default: 10-fold cv
+cv.out <- glmnet::cv.glmnet(as.matrix(dtm.pc.train[, !(colnames(dtm.pc) == "spam")]),
+                            as.numeric(dtm.pc.train[,  (colnames(dtm.pc) == "spam")]),
+                    alpha=0,
+                    lambda=lambda.grid,
+                    family="binomial")
+
+cv.out$lambda.min # lambda with min estimated test error
+
+```
+
+The lambda of the simpliest model with error within 1 stad dev from minimun error:
+
+```{r}
+cv.out$lambda.1se # lambda of the simplest model
+# with error within 1 std from minumum error
+```
+
+Plot of the CV error: the two vertical lines are log(lambda.min) and log(lambda.1se)
+
+```{r}
+# plot the CV error (-+ 1 std) as a function of lambda
+plot(cv.out)
+# the two verticle lines are log(lambda.min) and
+# log(lambda.1se)
+abline(v=log(cv.out$lambda.1se),lwd=2,col="black")
+```
+
+```{r}
+# Previsione delle probabilità sul training set
+pred.prob <- predict(cv.out, 
+                     newx = as.matrix(dtm.pc.test[, !(colnames(dtm.pc) == "spam")]), 
+                     s = cv.out$lambda.1se, 
+                     type = "response")
+```
+
+
+```{r}
+# Classificazione binaria (cutoff 0.5)
+pred <- ifelse(pred.prob > 0.5, 1, 0)
+
+# Test Error Rate
+TER2.mod <- mean(pred != dtm.pc.test$spam)
+TER2.mod
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "ridge regression", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(cv.out,model,ridge.mod,std.cof,X,lambda.grid,TER2.mod,y,std.coeff,pred,pred.prob,lambda_values,cv_data,coef_matrix)
+```
+
+
+### Lasso Regression
+
+```{r}
+set.seed(123)
+lambda.grid <- 10^seq(-6,5,length=100)
+# if lambda = 0 then ridge becomes lm
+# if lambda --> Inf then all coeffs --> 0 since
+# RSS impact is negligible, relative to the
+# role played by the penalty
+ridge.mod <- glmnet::glmnet(dtm.pc.train[, !(colnames(dtm.pc) == "spam")],
+                            dtm.pc.train[,  (colnames(dtm.pc) == "spam")],
+                            alpha=1,
+                            lambda=lambda.grid,
+                            family = "binomial")
+dim(coef(ridge.mod)) #     18 coeffs (one intercept + 17pcs)
+#                        x 100 lambdas
+```
+
+
+```{r}
+matplot(ridge.mod$lambda,
+        t(as.matrix(ridge.mod$beta)),
+        type="l",log="x",lwd=2,
+        main="Lasso regressors",
+        xlab="lambda",
+        ylab="coeff")
+
+```
+
+```{r}
+set.seed(123)
+
+# CV for finding the optimal lambda:
+# we can use cv.glmnet in the same package
+# by default: 10-fold cv
+cv.out <- glmnet::cv.glmnet(as.matrix(dtm.pc.train[, !(colnames(dtm.pc) == "spam")]),
+                            as.numeric(dtm.pc.train[,  (colnames(dtm.pc) == "spam")]),
+                    alpha=1,
+                    lambda=lambda.grid,
+                    family="binomial")
+
+cv.out$lambda.min # lambda with min estimated test error
+
+```
+
+The lambda of the simpliest model with error within 1 stad dev from minimun error:
+
+```{r}
+cv.out$lambda.1se # lambda of the simplest model
+# with error within 1 std from minumum error
+```
+
+Plot of the CV error: the two vertical lines are log(lambda.min) and log(lambda.1se)
+
+```{r}
+# plot the CV error (-+ 1 std) as a function of lambda
+plot(cv.out)
+# the two verticle lines are log(lambda.min) and
+# log(lambda.1se)
+abline(v=log(cv.out$lambda.1se),lwd=2,col="black")
+```
+
+At the top of this plot, we can observe how the number of coefficients in the model progressively decreases. This happens because, as mentioned earlier, lasso has the ability to shrink some coefficients exactly to zero, effectively removing them from the model. This is in contrast to ridge regression, which only shrinks coefficients toward zero without ever setting them exactly to zero.
+
+```{r}
+# Previsione delle probabilità sul training set
+pred.prob <- predict(cv.out, 
+                     newx = as.matrix(dtm.pc.test[, !(colnames(dtm.pc) == "spam")]), 
+                     s = cv.out$lambda.1se, 
+                     type = "response")
+```
+
+
+```{r}
+# Classificazione binaria (cutoff 0.5)
+pred <- ifelse(pred.prob > 0.5, 1, 0)
+
+# Test Error Rate
+TER2.mod <- mean(pred != dtm.pc.test$spam)
+TER2.mod
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "lasso regression", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(cv.out,model,ridge.mod,std.cof,X,lambda.grid,TER2.mod,y,std.coeff,pred,pred.prob,poly.model)
+```
+
+
+### Regression Tree (best)
+
+```{r}
+model <- tree::tree(as.factor(spam) ~ . , dtm.pc.train)
+
+summary(model)
+```
+
+Tree to prune:
+
+```{r warning=FALSE}
+plot(model)
+
+# Aggiungi testo migliorato
+text(model, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))
+
+```
+
+Unpruned tree
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+Searching the best point to prune the tree
+
+```{r}
+set.seed(1)
+
+model.cv= tree::cv.tree(model,
+                        FUN= prune.misclass)
+```
+
+Optimal size of the tree:
+
+```{r}
+# Trova la posizione del minimo errore
+min_dev_index <- which.min(model.cv$dev)
+
+# Numero ottimale di nodi corrispondente al minimo errore
+optimal_size <- model.cv$size[min_dev_index]
+optimal_size
+```
+
+Number of terminal nodes
+
+```{r}
+cv_data <- data.frame(
+  Size = model.cv$size,       # Numero di nodi terminali
+  Deviance = model.cv$dev      # Devianza
+)
+
+# Improved plot with ggplot2
+library(ggplot2)
+ggplot(cv_data, aes(x = Size, y = Deviance)) +
+  geom_line(color = "steelblue", linewidth = 1.5) +
+  geom_point(color = "steelblue", size = 3, shape = 19) +
+  geom_vline(xintercept = optimal_size, 
+             color = "red", 
+             linetype = "dashed", 
+             linewidth = 1) +
+  geom_point(data = subset(cv_data, Size == optimal_size),
+             color = "red", 
+             size = 5, 
+             shape = 1) +
+  annotate("text", 
+           x = optimal_size, 
+           y = max(cv_data$Deviance)-100,
+           label = paste("Optimal size =", optimal_size),
+           color = "red",
+           vjust = -1,
+           hjust = -0.1) +
+  scale_x_continuous(breaks = seq(min(cv_data$Size), 
+                                max(cv_data$Size), 
+                                by = 1)) +
+  labs(title = "Tree Complexity vs. Deviance",
+       subtitle = "Cross-validated deviance as function of tree size",
+       x = "Number of Terminal Nodes",  # Fixed typo in "Terminal"
+       y = "Cross-Validated Deviance") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+```
+
+Value of the cost-complexity parameter
+
+```{r warning=FALSE}
+# Create a data frame for plotting
+ccp_data <- data.frame(
+  Alpha = model.cv$k,
+  Deviance = model.cv$dev
+)
+
+# Find the optimal alpha value
+optimal_alpha <- model.cv$k[which.min(model.cv$dev)]
+
+# Enhanced plot with ggplot2
+library(ggplot2)
+ggplot(ccp_data, aes(x = Alpha, y = Deviance)) +
+  geom_line(color = "steelblue", linewidth = 1.5) +
+  geom_point(color = "steelblue", size = 3) +
+  geom_vline(xintercept = optimal_alpha,  # CORRETTO: xintercept invece di xintercept
+             color = "red", 
+             linetype = "dashed", 
+             linewidth = 1) +
+  geom_point(data = subset(ccp_data, Alpha == optimal_alpha),
+             color = "red", 
+             size = 5, 
+             shape = 1) +
+  annotate("text",
+           x = optimal_alpha,
+           y = max(ccp_data$Deviance)-100,
+           label = paste("Optimal alpha =", round(optimal_alpha, 4)),
+           color = "red",
+           vjust = -1,
+           hjust = -0.1) +
+  scale_x_continuous(trans = 'log10',
+                     breaks = scales::trans_breaks("log10", function(x) 10^x),
+                     labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  labs(title = "Cost-Complexity Tradeoff",
+       subtitle = "Cross-validated deviance vs. complexity parameter (alpha)",  # CORRETTO: parameter invece di parameter
+       x = expression(paste("Complexity Parameter (", alpha, ")")),  # CORRETTO: Parameter invece di Parameter
+       y = "Cross-Validated Deviance") +
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+```
+
+```{r warning=FALSE}
+library(tree)
+model.pruned = tree::prune.misclass(model,
+                                 best = optimal_size)
+```
+
+```{r warning=FALSE}
+plot(model.pruned)
+# Aggiungi testo migliorato
+text(model.pruned, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))  
+
+```
+
+```{r}
+pred= predict(model.pruned, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+The test error rate is the same but the model is simplier. 
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "classification tree best", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,model,model.cv,model.pruned,min_dev_index,optimal_size,optimal_alpha,ccp_data,cv_data)
+```
+
+
+### Regression Tree (simplier)
+
+We can further prune the tree: if the plot shows that the error remains similar for a smaller number of terminal nodes, we can opt for a more parsimonious model. Specifically, we select the smallest tree whose cross-validation error is within 1 standard error of the minimum.
+
+```{r}
+model <- tree::tree(as.factor(spam) ~ . , dtm.pc.train)
+
+summary(model)
+```
+
+Tree to prune:
+
+```{r warning=FALSE}
+plot(model)
+text(model, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))  
+```
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+```{r}
+set.seed(1)
+
+model.cv= tree::cv.tree(model,
+                        FUN= prune.misclass)
+```
+
+```{r}
+# Calcola la devianza minima e la sua soglia "1 SE"
+min_dev <- min(model.cv$dev)
+se_threshold <- min_dev + sd(model.cv$dev) / sqrt(length(model.cv$dev))
+
+# Trova il modello più semplice con errore <= soglia
+simpler_size <- min(model.cv$size[model.cv$dev <= se_threshold])
+simpler_size
+```
+
+The best model and the 1-SE model are the same.
+
+```{r warning=FALSE}
+library(tree)
+model.pruned = tree::prune.misclass(model,
+                                 best = simpler_size)
+```
+
+```{r warning=FALSE}
+plot(model.pruned)
+text(model.pruned, 
+     digits = 3, 
+     cex = 0.85,
+     col = "forestgreen",
+     font = 2,
+     use.n = TRUE,
+     fancy = TRUE,
+     bg = rgb(0.95, 0.95, 0.85))  
+```
+
+```{r}
+pred= predict(model.pruned, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+The error rate is a little bit higher, but the model is much simpler (from 10 to 3).
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "classification tree 1se", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,model,model.cv,model.pruned, min_dev, simpler_size, se_threshold)
+```
+
+### Bagging
+
+```{r warning=FALSE}
+library(randomForest)
+set.seed(1)
+
+model= randomForest(as.factor(spam) ~ . , dtm.pc.train,
+                    mtry=ncol(dtm.pc.train)-1, importance=T)
+model
+```
+
+```{r}
+varImpPlot(model)
+```
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "bagging", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,model,model.cv,model.pruned)
+```
+
+### Random Forest
+
+```{r warning=FALSE}
+library(randomForest)
+set.seed(1)
+
+model= randomForest(as.factor(spam) ~ . , dtm.pc.train,
+                     importance=T)
+model
+```
+
+```{r}
+pred= predict(model, dtm.pc.test, type="class")
+```
+
+```{r}
+TER2.mod=mean(pred!=dtm.pc.test$spam) 
+TER2.mod
+```
+
+```{r}
+varImpPlot(model)
+```
+
+```{r}
+TER2 <- rbind(TER2, data.frame(method = "random forest", training.error.rate = TER2.mod))
+```
+
+
+```{r warning=FALSE}
+rm(pred,TER2.mod,model,model.cv,model.pruned)
+```
+
+
+
+
+
+
+# Comparison
+
+```{r}
+
+TER <- cbind(TER, TER2[, 2, drop = FALSE])
+
+
+colnames(TER)[2] <- "ter unproc dtm"  
+colnames(TER)[3] <- "ter proc dtm"  
+
+rm(TER2)
+TER
+```
+
+Almost all classification models perform better when using the processed DTM. This suggests that the preprocessing choices, such as removing stopwords and filtering low-frequency terms, were effective, even though we later applied Principal Component Analysis on top of the DTM.
+
+Regarding model performance, tree based models and KNN classification achieved the best results in classifying YouTube comments as spam or not.
+
+In particular, the best performing model was a Random Forest, which is an ensemble method that improves upon individual decision trees by averaging multiple trees built on bootstrap samples and random subsets of features. In this case, the test error rate was:
+
+```{r}
+TER[12,3]
+```
+
+Another model that performed well, as previously mentioned, was K Nearest Neighbors, specifically the 6-nearest neighbors classifier. As the name suggests, it classifies a new observation based on the majority class (mode) among its six closest neighbors in the space of Xs.
+
+The test error rate for this classifier was:
+
+```{r}
+TER[6,3]
+```
+
+
+The 'TER' data frame is extracted in Python for further comparison. Uncomment the code if needed.
+
+```{r}
+#write.csv(TER, "C://Users//paren//Desktop//_MAGISTRALE//_Machine_Learning//progetto//TER.csv", row.names = FALSE)
+```
+
