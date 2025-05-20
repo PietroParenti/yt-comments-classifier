@@ -12,4 +12,4 @@ Finally, I built a neural network model.
 All models are then compared to determine which one performs best.
 
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/PietroParenti/youtube-comments-classifier/blob/main/Spam_Detector.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/PietroParenti/youtube-comments-classifier/blob/main/SPAM.ipynb)
